@@ -129,10 +129,10 @@ static int ext4_readdir(struct file *file, struct dir_context *ctx)
 
 	if (ext4_has_inline_data(inode)) {
 		int has_inline_data = 1;
-		err = ext4_read_inline_dir(file, ctx,
+		int ret = ext4_read_inline_dir(file, ctx,
 					   &has_inline_data);
 		if (has_inline_data)
-			return err;
+			return ret;
 	}
 
 	if (ext4_encrypted_inode(inode)) {
