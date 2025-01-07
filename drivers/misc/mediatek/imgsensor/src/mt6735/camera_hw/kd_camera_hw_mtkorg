@@ -1,0 +1,838 @@
+
+#include <linux/videodev2.h>
+#include <linux/i2c.h>
+#include <linux/platform_device.h>
+#include <linux/delay.h>
+#include <linux/cdev.h>
+#include <linux/uaccess.h>
+#include <linux/fs.h>
+#include <asm/atomic.h>
+#include "kd_camera_hw.h"
+
+#include "kd_imgsensor.h"
+#include "kd_imgsensor_define.h"
+#include "kd_camera_feature.h"
+
+#include <mach/items.h>
+
+/******************************************************************************
+ * Debug configuration
+******************************************************************************/
+#define PFX "[kd_camera_hw]"
+#define PK_DBG_NONE(fmt, arg...)    do {} while (0)
+#define PK_DBG_FUNC(fmt, args...)    pr_debug(PFX  fmt, ##args)
+
+#define DEBUG_CAMERA_HW_K
+#if 1//def DEBUG_CAMERA_HW_K
+#define PK_DBG PK_DBG_FUNC
+#define PK_ERR(fmt, arg...) pr_err(fmt, ##arg)
+#define PK_XLOG_INFO(fmt, args...)  pr_debug(PFX  fmt, ##args)
+
+#else
+#define PK_DBG(a, ...)
+#define PK_ERR(a, ...)
+#define PK_XLOG_INFO(fmt, args...)
+#endif
+
+//----------------------------------------------
+//static unsigned long gpio_camera_cmrst_pin = 0;
+//static unsigned long gpio_camera_cmrst1_pin = 0;
+//static unsigned long gpio_camera_cmpdn_pin = 0;
+//static unsigned long gpio_camera_cmpdn1_pin = 0;
+//static unsigned long gpio_af_power_en_pin = 0;
+
+/*static unsigned int main_camera_power_avdd = 0;
+static unsigned int main_camera_power_dvdd = 0;
+static unsigned int main_camera_power_iovdd = 0;
+static unsigned int main_camera_power_afvdd = 0;
+static unsigned int sub_camera_power_avdd = 0;
+static unsigned int sub_camera_power_dvdd = 0;
+static unsigned int sub_camera_power_iovdd = 0;
+static unsigned int sub_camera_power_afvdd = 0;*/
+
+#define IMG_NAME_LEN 32
+
+int mipidvp = 0;
+int dualdvp = 0;
+int dualmipi = 0;
+int diffdvdd = 0;
+int afpoweren = 0;
+int IS4EC = 0;
+char maincam[64];
+char subcam[64];
+char specialcam[64];
+
+/* GPIO Pin control*/
+struct platform_device *cam_plt_dev = NULL;
+struct pinctrl *camctrl = NULL;
+struct pinctrl_state *cam0_pnd_h = NULL;
+struct pinctrl_state *cam0_pnd_l = NULL;
+struct pinctrl_state *cam0_rst_h = NULL;
+struct pinctrl_state *cam0_rst_l = NULL;
+struct pinctrl_state *cam1_pnd_h = NULL;
+struct pinctrl_state *cam1_pnd_l = NULL;
+struct pinctrl_state *cam1_rst_h = NULL;
+struct pinctrl_state *cam1_rst_l = NULL;
+struct pinctrl_state *cam_ldo0_h = NULL;
+struct pinctrl_state *cam_ldo0_l = NULL;
+
+
+#define VOL_2800 2800000
+#define VOL_1800 1800000
+#define VOL_1500 1500000
+#define VOL_1200 1200000
+#define VOL_1000 1000000
+
+
+typedef struct img_info {
+	char name[IMG_NAME_LEN];
+	u32 vcam_a_volt;	// avdd
+	u32 vcam_d_volt;	// dvdd
+	u32 vcam_d2_volt;	// iovdd
+	u32 vcam_a2_volt;	// afvdd
+	u32 rst_on;			// sensor work
+	u32 rst_off;		// sensor reset
+	u32 pdn_on;			// sensor work
+	u32 pdn_off;		// sensor sleep
+}IMG_INFO_STRUCT;
+
+IMG_INFO_STRUCT camera_list[] = {
+//----30w-----
+	{"gc0308yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},	// avdd iovdd not use
+	{"gc0311yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},	// dvdd not use; doesn't confirm rst_on and off
+	{"gc0328yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},	// dvdd not use
+	{"gc0329yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},	// dvdd not use	
+	{"bf3a03yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"bf3703yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},		
+	{"siv121duyuv", 	VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},		//Elink_yg@20140314
+	{"gc0312yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},	// dvdd not use; doesn't confirm rst_on and off
+	{"gc0310mipiyuv", 	VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+//----200w----
+	{"gc2035yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},	
+	{"gc2235raw", 		VOL_2800, 		VOL_1500, 		VOL_1800, 		0,		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"gc2355raw", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0,		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"gc2155yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0,		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},	
+	{"bf3920yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"gc2145yuv", 		VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"gc2145mipiyuv", 	VOL_2800, 		VOL_1800, 		VOL_1800, 		0, 		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"gc2235mipiraw", VOL_2800, 		VOL_1800, 		VOL_1800, 		0,		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"gc2355mipiraw", VOL_2800, 		VOL_1800, 		VOL_1800, 		0,		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"gc2755mipiraw", VOL_2800, 		VOL_1800, 		VOL_1800, 		0,		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"sp2508mipiraw", VOL_2800, 		VOL_1500, 		VOL_1800, 		0,		  GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+//----500w----
+	{"gc5004raw", 		VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"ov5647raw", 		VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"s5k4ecgxyuv", 	VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ONE, GPIO_OUT_ZERO},
+	{"gc5004mipiraw", VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"ov5648mipiraw", VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ONE, GPIO_OUT_ZERO},
+	{"ov5647mipiraw", VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"hm5040mipiraw", VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ONE, GPIO_OUT_ZERO},
+	{"gc5024mipiraw", VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ZERO, GPIO_OUT_ONE},
+	{"hm5065yuv",     VOL_2800, 		VOL_1500, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ONE, GPIO_OUT_ZERO},
+//----800w----
+	{"ov8858mipiraw", VOL_2800, 		VOL_1200, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ONE, GPIO_OUT_ZERO},
+	{"gs8604mipiraw", VOL_2800, 		VOL_1200, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ONE, GPIO_OUT_ZERO},
+	{"hm8131mipiraw", VOL_2800, 		VOL_1200, 		VOL_1800, 		VOL_2800, GPIO_OUT_ONE, GPIO_OUT_ZERO, GPIO_OUT_ONE, GPIO_OUT_ZERO},
+};
+
+int mtkcam_gpio_init(struct platform_device *pdev)
+{
+	int ret = 0;
+
+	camctrl = devm_pinctrl_get(&pdev->dev);
+	if (IS_ERR(camctrl)) {
+		dev_err(&pdev->dev, "Cannot find camera pinctrl!");
+		ret = PTR_ERR(camctrl);
+	}
+	/*Cam0 Power/Rst Ping initialization */
+	cam0_pnd_h = pinctrl_lookup_state(camctrl, "cam0_pnd1");
+	if (IS_ERR(cam0_pnd_h)) {
+		ret = PTR_ERR(cam0_pnd_h);
+		pr_debug("%s : pinctrl err, cam0_pnd_h\n", __func__);
+	}
+
+	cam0_pnd_l = pinctrl_lookup_state(camctrl, "cam0_pnd0");
+	if (IS_ERR(cam0_pnd_l)) {
+		ret = PTR_ERR(cam0_pnd_l);
+		pr_debug("%s : pinctrl err, cam0_pnd_l\n", __func__);
+	}
+
+
+	cam0_rst_h = pinctrl_lookup_state(camctrl, "cam0_rst1");
+	if (IS_ERR(cam0_rst_h)) {
+		ret = PTR_ERR(cam0_rst_h);
+		pr_debug("%s : pinctrl err, cam0_rst_h\n", __func__);
+	}
+
+	cam0_rst_l = pinctrl_lookup_state(camctrl, "cam0_rst0");
+	if (IS_ERR(cam0_rst_l)) {
+		ret = PTR_ERR(cam0_rst_l);
+		pr_debug("%s : pinctrl err, cam0_rst_l\n", __func__);
+	}
+
+	/*Cam1 Power/Rst Ping initialization */
+	cam1_pnd_h = pinctrl_lookup_state(camctrl, "cam1_pnd1");
+	if (IS_ERR(cam1_pnd_h)) {
+		ret = PTR_ERR(cam1_pnd_h);
+		pr_debug("%s : pinctrl err, cam1_pnd_h\n", __func__);
+	}
+
+	cam1_pnd_l = pinctrl_lookup_state(camctrl, "cam1_pnd0");
+	if (IS_ERR(cam1_pnd_l)) {
+		ret = PTR_ERR(cam1_pnd_l);
+		pr_debug("%s : pinctrl err, cam1_pnd_l\n", __func__);
+	}
+
+
+	cam1_rst_h = pinctrl_lookup_state(camctrl, "cam1_rst1");
+	if (IS_ERR(cam1_rst_h)) {
+		ret = PTR_ERR(cam1_rst_h);
+		pr_debug("%s : pinctrl err, cam1_rst_h\n", __func__);
+	}
+
+
+	cam1_rst_l = pinctrl_lookup_state(camctrl, "cam1_rst0");
+	if (IS_ERR(cam1_rst_l)) {
+		ret = PTR_ERR(cam1_rst_l);
+		pr_debug("%s : pinctrl err, cam1_rst_l\n", __func__);
+	}
+	/*externel LDO enable */
+	cam_ldo0_h = pinctrl_lookup_state(camctrl, "cam_ldo0_1");
+	if (IS_ERR(cam_ldo0_h)) {
+		ret = PTR_ERR(cam_ldo0_h);
+		pr_debug("%s : pinctrl err, cam_ldo0_h\n", __func__);
+	}
+
+
+	cam_ldo0_l = pinctrl_lookup_state(camctrl, "cam_ldo0_0");
+	if (IS_ERR(cam_ldo0_l)) {
+		ret = PTR_ERR(cam_ldo0_l);
+		pr_debug("%s : pinctrl err, cam_ldo0_l\n", __func__);
+	}
+	return ret;
+}
+
+int mtkcam_gpio_set(int PinIdx, int PwrType, int Val)
+{
+	int ret = 0;
+
+	switch (PwrType) {
+	case CAMRST:
+		//if (PinIdx == 0) {
+			if (Val == 0)
+				pinctrl_select_state(camctrl, cam0_rst_l);
+			else
+				pinctrl_select_state(camctrl, cam0_rst_h);
+		//} else {
+			//if (Val == 0)
+				//pinctrl_select_state(camctrl, cam1_rst_l);
+			//else
+				//pinctrl_select_state(camctrl, cam1_rst_h);
+		//}
+		break;
+	case CAMPDN:
+		if (PinIdx == 0) {
+			if (Val == 0)
+				pinctrl_select_state(camctrl, cam0_pnd_l);
+			else
+				pinctrl_select_state(camctrl, cam0_pnd_h);
+		} else {
+			if (Val == 0)
+				pinctrl_select_state(camctrl, cam1_pnd_l);
+			else
+				pinctrl_select_state(camctrl, cam1_pnd_h);
+		}
+
+		break;
+	//case CAMLDO:
+		//if (Val == 0)
+			//pinctrl_select_state(camctrl, cam_ldo0_l);
+		//else
+			//pinctrl_select_state(camctrl, cam_ldo0_h);
+		//break;
+	default:
+		PK_DBG("PwrType(%d) is invalid !!\n", PwrType);
+		break;
+	};
+
+	PK_DBG("PinIdx(%d) PwrType(%d) val(%d)\n", PinIdx, PwrType, Val);
+
+	return ret;
+}
+
+int cntVCAMD = 0;
+int cntVCAMA = 0;
+int cntVCAMIO = 0;
+int cntVCAMAF = 0;
+int cntVCAMD_SUB = 0;
+
+static DEFINE_SPINLOCK(kdsensor_pw_cnt_lock);
+
+
+bool _hwPowerOnCnt(KD_REGULATOR_TYPE_T powerId, int powerVolt, char *mode_name)
+{
+
+	if (_hwPowerOn(powerId, powerVolt)) {
+		spin_lock(&kdsensor_pw_cnt_lock);
+		if (powerId == VCAMD)
+			cntVCAMD += 1;
+		else if (powerId == VCAMA)
+			cntVCAMA += 1;
+		else if (powerId == VCAMIO)
+			cntVCAMIO += 1;
+		else if (powerId == VCAMAF)
+			cntVCAMAF += 1;
+		else if (powerId == SUB_VCAMD)
+			cntVCAMD_SUB += 1;
+		spin_unlock(&kdsensor_pw_cnt_lock);
+		return true;
+	}
+	return false;
+}
+
+bool _hwPowerDownCnt(KD_REGULATOR_TYPE_T powerId, char *mode_name)
+{
+	if (_hwPowerDown(powerId)) {
+		spin_lock(&kdsensor_pw_cnt_lock);
+		if (powerId == VCAMD)
+			cntVCAMD -= 1;
+		else if (powerId == VCAMA)
+			cntVCAMA -= 1;
+		else if (powerId == VCAMIO)
+			cntVCAMIO -= 1;
+		else if (powerId == VCAMAF)
+			cntVCAMAF -= 1;
+		else if (powerId == SUB_VCAMD)
+			cntVCAMD_SUB -= 1;
+		spin_unlock(&kdsensor_pw_cnt_lock);
+		return true;
+	}
+	return false;
+}
+
+void checkPowerBeforClose(char *mode_name)
+{
+	int i = 0;
+	PK_DBG
+	    ("[checkPowerBeforClose]cntVCAMD:%d, cntVCAMA:%d,cntVCAMIO:%d, cntVCAMAF:%d, cntVCAMD_SUB:%d,\n",
+	     cntVCAMD, cntVCAMA, cntVCAMIO, cntVCAMAF, cntVCAMD_SUB);
+	for (i = 0; i < cntVCAMD; i++)
+		_hwPowerDown(VCAMD);
+	for (i = 0; i < cntVCAMA; i++)
+		_hwPowerDown(VCAMA);
+	for (i = 0; i < cntVCAMIO; i++)
+		_hwPowerDown(VCAMIO);
+	for (i = 0; i < cntVCAMAF; i++)
+		_hwPowerDown(VCAMAF);
+	for (i = 0; i < cntVCAMD_SUB; i++)
+		_hwPowerDown(SUB_VCAMD);
+	cntVCAMD = 0;
+	cntVCAMA = 0;
+	cntVCAMIO = 0;
+	cntVCAMAF = 0;
+	cntVCAMD_SUB = 0;
+}
+
+int Handle_iovdd(bool Open, int pinSetIdx, char* mode_name)
+{
+	if(Open) {
+		//if(TRUE != hwPowerOn(pinSetIdx?sub_camera_power_iovdd:main_camera_power_iovdd, VOL_1800,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable digital power\n"); return -1; }
+		if (TRUE != _hwPowerOnCnt(VCAMIO, VOL_1800, mode_name)){ PK_DBG("[CAMERA SENSOR] Fail to enable digital power\n"); return -1; }
+		mdelay(5);
+	} else {
+		//if(TRUE != hwPowerDown(pinSetIdx?sub_camera_power_iovdd:main_camera_power_iovdd,mode_name)) { PK_DBG("[CAMERA SENSOR] [IOVDD] Fail to OFF digital power\n"); return -1; }
+		if (TRUE != _hwPowerDownCnt(VCAMIO, mode_name)) { PK_DBG("[CAMERA SENSOR] [IOVDD] Fail to OFF digital power\n"); return -1; }
+		mdelay(5);
+	}
+	return 0;
+}
+
+int IS_MIPI_CAM_Project(char *currSensorName)
+{
+  char *index1=NULL;
+  
+  index1 = strstr(currSensorName,"mipi");  
+  printk("[IS_MIPI_CAM_Project] index1 = %s currSensorName = %s \n", index1, currSensorName);
+  if (index1==NULL) {
+  	return 0;
+  }else {
+  	return 1;
+  }
+
+}
+
+int Interface_check(char *currSensorName, int pinSetIdx, int On, char* mode_name)
+{
+	if(mipidvp) {
+		if (pinSetIdx == 0 && IS_MIPI_CAM_Project(currSensorName) == 0) { 
+			printk("Main sensor not use [%s] dvp driver. \n", currSensorName); 
+			Handle_iovdd(On, pinSetIdx, mode_name);
+			return -1; 
+		} else if(pinSetIdx == 1 && IS_MIPI_CAM_Project(currSensorName) == 1) {
+			printk("Sub sensor not use [%s] mipi driver. \n", currSensorName);
+			Handle_iovdd(On, pinSetIdx, mode_name);
+			return -1; 
+		}
+	} else if (dualdvp) {
+		if (IS_MIPI_CAM_Project(currSensorName) == 1) { 
+			printk("Sensor not use [%s] mipi driver. \n", currSensorName); 
+			Handle_iovdd(On, pinSetIdx, mode_name);
+			return -1; 
+		}
+	} else if (dualmipi) {
+		if (IS_MIPI_CAM_Project(currSensorName) == 0) { 
+			printk("Sensor not use [%s] dvp driver. \n", currSensorName); 
+			Handle_iovdd(On, pinSetIdx, mode_name);
+			return -1; 
+		}
+	} 
+
+	return 0;
+}
+
+//----------------------------------------------
+/*
+#ifndef BOOL
+typedef unsigned char BOOL;
+#endif
+*/
+
+/* Mark: need to verify whether ISP_MCLK1_EN is required in here //Jessy @2014/06/04*/
+extern void ISP_MCLK1_EN(BOOL En);
+//extern void ISP_MCLK2_EN(BOOL En);
+//extern void ISP_MCLK3_EN(BOOL En);
+
+int kdCISModulePowerOn(CAMERA_DUAL_CAMERA_SENSOR_ENUM SensorIdx, char *currSensorName, BOOL On, char* mode_name)
+{
+
+      u32 pinSetIdx = 0;//default main sensor
+	//int pin = 0;
+	//int temp = 0;
+	
+	#define IDX_PS_AVDD 0
+	#define IDX_PS_DVDD 1
+	#define IDX_PS_IOVDD 2
+	#define IDX_PS_AFVDD 3
+	//----------------------------------------------
+	#define IDX_PS_CMRST 0
+	#define IDX_PS_CMPDN 4
+	#define IDX_PS_MODE 1
+	#define IDX_PS_ON   2
+	#define IDX_PS_OFF  3
+	int i;
+	int sizeoflist ;
+	u32	pinSet[2][8] = {
+		//for main sensor
+		{
+			0,//gpio_camera_cmrst_pin,
+			0,//GPIO_CAMERA_CMRST_PIN_M_GPIO,   /* mode */
+			camera_list[0].rst_on,          /* ON state */
+			camera_list[0].rst_off,         /* OFF state */
+			0,//gpio_camera_cmpdn_pin,
+			0,//GPIO_CAMERA_CMPDN_PIN_M_GPIO,
+			camera_list[0].pdn_on,
+			camera_list[0].pdn_off,
+		},
+		//for sub sensor
+		{
+			0,//gpio_camera_cmrst1_pin,
+			0,//GPIO_CAMERA_CMRST1_PIN_M_GPIO,
+			camera_list[0].rst_on,
+			camera_list[0].rst_off,
+			0,//gpio_camera_cmpdn1_pin,
+			0,//GPIO_CAMERA_CMPDN1_PIN_M_GPIO,
+			camera_list[0].pdn_on,
+			camera_list[0].pdn_off,
+		},
+      };
+
+//----------------------------------------------
+	u32 pmicSet[2][4] = {
+		//for main sensor
+		{
+			VCAMA,//main_camera_power_avdd,
+			VCAMD,//main_camera_power_dvdd,
+			VCAMIO,//main_camera_power_iovdd,
+			VCAMAF,//main_camera_power_afvdd,
+		},
+		//for sub sensor
+		{
+			VCAMA,//sub_camera_power_avdd,
+			VCAMD,//sub_camera_power_dvdd,
+			VCAMIO,//sub_camera_power_iovdd,
+			VCAMAF,//sub_camera_power_afvdd,
+		},
+	};
+	
+//----------------------------------------------
+	/*if(item_exist("camera.sub.rst.pin"))
+		{pin = item_integer("camera.sub.rst.pin",0);gpio_camera_cmrst1_pin = (pin | 0x80000000);}
+	else*/
+		//gpio_camera_cmrst1_pin = GPIO_CAMERA_CMRST1_PIN;
+
+	/*if(item_exist("camera.sub.pwd.pin"))
+		{pin = item_integer("camera.sub.pwd.pin",0);gpio_camera_cmpdn1_pin = (pin | 0x80000000);}
+	else*/
+		//gpio_camera_cmpdn1_pin = GPIO_CAMERA_CMPDN1_PIN;
+
+	/*if(item_exist("camera.main.rst.pin"))
+		{pin = item_integer("camera.main.rst.pin",0);gpio_camera_cmrst_pin = (pin | 0x80000000);}
+	else*/
+		//gpio_camera_cmrst_pin = GPIO_CAMERA_CMRST_PIN;
+
+	/*if(item_exist("camera.main.pwd.pin"))
+		{pin = item_integer("camera.main.pwd.pin",0);gpio_camera_cmpdn_pin = (pin | 0x80000000);}
+	else*/
+		//gpio_camera_cmpdn_pin = GPIO_CAMERA_CMPDN_PIN;
+
+	/*if(item_exist("camera.af.power.pin"))
+		{pin = item_integer("camera.af.power.pin",0);gpio_af_power_en_pin = (pin | 0x80000000); afpoweren = 1;}
+	else
+		{gpio_af_power_en_pin = GPIO21 | 0x80000000 ; afpoweren = 0;}*/
+
+	PK_DBG("------------kdCISModulePowerOn1------------ !!\n");
+
+	printk("------------kdCISModulePowerOn2------------ !!\n");
+
+	
+	if(item_exist("camera.main.interface") && item_exist("camera.sub.interface")) {	
+		item_string(maincam,"camera.main.interface",0);
+		item_string(subcam,"camera.sub.interface",0);
+		if( (0 == strcmp(maincam, "mipi")) && (0 == strcmp(subcam, "mipi")) ) {mipidvp = 0; dualdvp = 0; dualmipi = 1; }
+		else if( (0 == strcmp(maincam, "dvp")) && (0 == strcmp(subcam, "dvp")) ) {mipidvp = 0; dualdvp = 1; dualmipi = 0; }
+		else if( (0 == strcmp(maincam, "mipi")) && (0 == strcmp(subcam, "dvp")) ){ mipidvp = 1; dualdvp = 0; dualmipi = 0; }
+		printk("\n[kdCISModulePowerOn] maincam is %s, subcam is %s. \n", maincam, subcam);
+	} else { mipidvp = 0; dualdvp = 0; dualmipi = 0; }
+	
+	/*temp = item_exist("camera.main.power.avdd") & item_exist("camera.sub.power.avdd") \
+			& item_exist("camera.main.power.dvdd") & item_exist("camera.sub.power.dvdd") \
+			& item_exist("camera.main.power.iovdd") & item_exist("camera.sub.power.iovdd") \
+			& item_exist("camera.main.power.afvdd") & item_exist("camera.sub.power.afvdd");
+	if(temp) {
+		printk("\n[kdCISModulePowerOn] avdd, dvdd, iovdd, afvdd all exist in items. \n");
+		main_camera_power_avdd = item_integer("camera.main.power.avdd",0);
+		main_camera_power_dvdd = item_integer("camera.main.power.dvdd",0);
+		main_camera_power_iovdd = item_integer("camera.main.power.iovdd",0);
+		main_camera_power_afvdd = item_integer("camera.main.power.afvdd",0);
+		sub_camera_power_avdd = item_integer("camera.sub.power.avdd",0);
+		sub_camera_power_dvdd = item_integer("camera.sub.power.dvdd",0);
+		sub_camera_power_iovdd = item_integer("camera.sub.power.iovdd",0);
+		sub_camera_power_afvdd = item_integer("camera.sub.power.afvdd",0);
+	} else {*/
+		printk("\n[kdCISModulePowerOn] avdd, dvdd, iovdd, afvdd use default value. \n");
+		/*main_camera_power_avdd = VCAMA;
+		main_camera_power_dvdd = VCAMD;
+		main_camera_power_iovdd = VCAMIO;
+		main_camera_power_afvdd = VCAMAF;
+		sub_camera_power_avdd = VCAMA;
+		sub_camera_power_dvdd = VCAMD;
+		sub_camera_power_iovdd = VCAMIO;
+		sub_camera_power_afvdd = VCAMAF;*/
+	//}
+
+
+	/*if(item_exist("camera.sensor.special")) {
+		item_string(specialcam,"camera.sensor.special",0);
+		if( 0 == strcmp(specialcam, "s5k4ecgx_yuv") ) { IS4EC = 1; }
+	} else { IS4EC = 0; }*/
+
+
+	sizeoflist = sizeof(camera_list) / sizeof(IMG_INFO_STRUCT);
+	for (i = 0; i < sizeoflist; i++)
+	{
+		if(strcmp(currSensorName, camera_list[i].name) == 0)
+			break;
+	}
+
+	if (i == sizeoflist)
+	{
+		printk("list of designated camera isn't exist currSensorName =%s\n", currSensorName);
+		return -EIO;
+	}
+	
+	pinSet[0][2] = camera_list[i].rst_on;
+	pinSet[0][3] = camera_list[i].rst_off;
+	pinSet[0][6] = camera_list[i].pdn_on;
+	pinSet[0][7] = camera_list[i].pdn_off;
+
+	pinSet[1][2] = camera_list[i].rst_on;
+	pinSet[1][3] = camera_list[i].rst_off;
+	pinSet[1][6] = camera_list[i].pdn_on;
+	pinSet[1][7] = camera_list[i].pdn_off;
+	
+
+	if (DUAL_CAMERA_MAIN_SENSOR == SensorIdx) { pinSetIdx = 0; }
+	else if (DUAL_CAMERA_SUB_SENSOR == SensorIdx) { pinSetIdx = 1; }
+
+//----------------------------------------------
+    //power ON
+    if (On) {
+
+#if 1
+         ISP_MCLK1_EN(1);
+         //ISP_MCLK2_EN(1);
+         //ISP_MCLK3_EN(1);
+#else
+        if(pinSetIdx == 0 ) {
+           ISP_MCLK1_EN(1);
+        }
+        else if (pinSetIdx == 1) {
+            ISP_MCLK1_EN(1);
+        }
+#endif 
+
+        
+#ifdef MTK_MT6306_SUPPORT
+        PK_DBG("MTK_MT6306_SUPPORT is defined, mt6306_set_gpio_dir: %d\n", pinSet[pinSetIdx][IDX_PS_CMRST]);
+#endif       
+		printk("\n kdCISModulePowerOn -on:currSensorName=%s; pinSetIdx=%d\n",currSensorName, pinSetIdx);
+
+		if(!IS4EC) {
+			if( Interface_check(currSensorName, pinSetIdx, On, mode_name) != 0 ) { goto _kdCISModulePowerOn_exit_; }
+
+			//Disable active camera
+			//if(mt_set_gpio_mode(pinSet[pinSetIdx][IDX_PS_CMRST],pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_MODE])){PK_DBG("[CAMERA SENSOR] set gpio mode failed!! \n");}
+			//if(mt_set_gpio_mode(pinSet[pinSetIdx][IDX_PS_CMPDN],pinSet[pinSetIdx][IDX_PS_CMPDN+IDX_PS_MODE])){PK_DBG("[CAMERA LENS] set gpio mode failed!! \n");}
+			//if(mt_set_gpio_dir(pinSet[pinSetIdx][IDX_PS_CMRST],GPIO_DIR_OUT)){PK_DBG("[CAMERA SENSOR] set gpio dir failed!! \n");}
+			//if(mt_set_gpio_dir(pinSet[pinSetIdx][IDX_PS_CMPDN],GPIO_DIR_OUT)){PK_DBG("[CAMERA LENS] set gpio dir failed!! \n");}
+			//if(mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMPDN],pinSet[pinSetIdx][IDX_PS_CMPDN+IDX_PS_OFF])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");} //high == power down lens module
+			mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+			mdelay(1);
+			//if(mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMRST],pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF])){PK_DBG("[CAMERA SENSOR] set gpio failed!! \n");} //low == reset sensor
+			mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+			mdelay(2);
+			//~Disable active camera
+			 
+			//DOVDD
+			printk("\n [kdCISModulePowerOn] [IOVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_IO.\n" ,pmicSet[pinSetIdx][IDX_PS_IOVDD] ,pinSetIdx);
+			if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_IOVDD], camera_list[i].vcam_d2_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] [IOVDD] Fail to enable digital power\n"); }
+			mdelay(5);		 
+			//AVDD
+			printk("\n [kdCISModulePowerOn] [AVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_A.\n" ,pmicSet[pinSetIdx][IDX_PS_AVDD] ,pinSetIdx);
+			if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_AVDD], camera_list[i].vcam_a_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] [AVDD] Fail to enable analog power\n"); }
+			mdelay(5);
+			//DVDD
+			printk("\n [kdCISModulePowerOn] [DVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_D.\n" ,pmicSet[pinSetIdx][IDX_PS_DVDD] ,pinSetIdx);
+			if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_DVDD], camera_list[i].vcam_d_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] [DVDD] Fail to enable digital power\n"); }      
+			mdelay(5);	 
+			//AF_VCC
+			printk("\n [kdCISModulePowerOn] [AFVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_AF.\n" ,pmicSet[pinSetIdx][IDX_PS_AFVDD] ,pinSetIdx);
+			if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_AFVDD], camera_list[i].vcam_a2_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] [AFVDD] Fail to enable analog power\n"); } 
+			mdelay(5);
+			
+			//disable inactive sensor
+			if (GPIO_CAMERA_INVALID != pinSet[1-pinSetIdx][IDX_PS_CMRST]) {
+				//if(mt_set_gpio_mode(pinSet[1-pinSetIdx][IDX_PS_CMRST],pinSet[1-pinSetIdx][IDX_PS_CMRST+IDX_PS_MODE])){PK_DBG("[CAMERA SENSOR] set gpio mode failed!! \n");}
+				//if(mt_set_gpio_mode(pinSet[1-pinSetIdx][IDX_PS_CMPDN],pinSet[1-pinSetIdx][IDX_PS_CMPDN+IDX_PS_MODE])){PK_DBG("[CAMERA LENS] set gpio mode failed!! \n");}
+				//if(mt_set_gpio_dir(pinSet[1-pinSetIdx][IDX_PS_CMRST],GPIO_DIR_OUT)){PK_DBG("[CAMERA SENSOR] set gpio dir failed!! \n");}
+				//if(mt_set_gpio_dir(pinSet[1-pinSetIdx][IDX_PS_CMPDN],GPIO_DIR_OUT)){PK_DBG("[CAMERA LENS] set gpio dir failed!! \n");}
+				//if(mt_set_gpio_out(pinSet[1-pinSetIdx][IDX_PS_CMRST],pinSet[1-pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF])){PK_DBG("[CAMERA SENSOR] set gpio failed!! \n");} //low == reset sensor
+				//if(mt_set_gpio_out(pinSet[1-pinSetIdx][IDX_PS_CMPDN],pinSet[1-pinSetIdx][IDX_PS_CMPDN+IDX_PS_OFF])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");} //high == power down lens module
+				mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+				mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+			}
+			
+			//enable active sensor
+			if (GPIO_CAMERA_INVALID != pinSet[pinSetIdx][IDX_PS_CMRST]) {
+				//if(mt_set_gpio_mode(pinSet[pinSetIdx][IDX_PS_CMRST],pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_MODE])){PK_DBG("[CAMERA SENSOR] set gpio mode failed!! \n");}
+				//if(mt_set_gpio_dir(pinSet[pinSetIdx][IDX_PS_CMRST],GPIO_DIR_OUT)){PK_DBG("[CAMERA SENSOR] set gpio dir failed!! \n");}
+				//if(mt_set_gpio_mode(pinSet[pinSetIdx][IDX_PS_CMPDN],pinSet[pinSetIdx][IDX_PS_CMPDN+IDX_PS_MODE])){PK_DBG("[CAMERA LENS] set gpio mode failed!! \n");}
+				//if(mt_set_gpio_dir(pinSet[pinSetIdx][IDX_PS_CMPDN],GPIO_DIR_OUT)){PK_DBG("[CAMERA LENS] set gpio dir failed!! \n");}
+				//if(mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMRST],pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF])){PK_DBG("[CAMERA SENSOR] set gpio failed!! \n");}
+				mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+				msleep(1);
+				//if(mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMPDN],pinSet[pinSetIdx][IDX_PS_CMPDN+IDX_PS_OFF])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");}
+				mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+				msleep(1);
+				//if(mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMRST],pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_ON])){PK_DBG("[CAMERA SENSOR] set gpio failed!! \n");}
+				mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_ON]);
+				msleep(5);
+				//if(mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMPDN],pinSet[pinSetIdx][IDX_PS_CMPDN+IDX_PS_ON])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");}
+				mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_ON]);
+				mdelay(5);
+			}
+
+			//for W785 AF_POWER_EN
+			//if(afpoweren) {
+				//mt_set_gpio_mode(gpio_af_power_en_pin, GPIO_MODE_00);
+				//mt_set_gpio_dir(gpio_af_power_en_pin, GPIO_DIR_OUT);
+				//mt_set_gpio_out(gpio_af_power_en_pin, 1);				
+			//}
+
+//----------------------------------------------			
+		} else { //s5k4ec
+			if (pinSetIdx == 0 && currSensorName && ((0 == strcmp(SENSOR_DRVNAME_S5K4ECGX_YUV,currSensorName)) || (0 == strcmp(SENSOR_DRVNAME_S5K4ECGX_MIPI_YUV,currSensorName)) )){
+				PK_DBG("[CAMERA SENSOR] kdCISModulePowerOn get in---sensorName:%s;  sensorIdx:%d; pinSetIdx=%d\n",currSensorName,SensorIdx, pinSetIdx);       
+				printk("\n [kdCISModulePowerOn] [AVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_A.\n" ,pmicSet[pinSetIdx][IDX_PS_AVDD] ,pinSetIdx);
+				if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_AVDD], camera_list[i].vcam_a_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable analog power\n"); }
+	        		printk("\n [kdCISModulePowerOn] [IOVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_IO.\n" ,pmicSet[pinSetIdx][IDX_PS_IOVDD] ,pinSetIdx);
+	        		if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_IOVDD], camera_list[i].vcam_d2_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable digital power\n"); }
+				printk("\n [kdCISModulePowerOn] [DVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_D.\n" ,pmicSet[pinSetIdx][IDX_PS_DVDD] ,pinSetIdx);
+				if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_DVDD], camera_list[i].vcam_d_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable digital power\n"); }
+				printk("\n [kdCISModulePowerOn] [AFVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_AF.\n" ,pmicSet[pinSetIdx][IDX_PS_AFVDD] ,pinSetIdx);
+				if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_AFVDD], camera_list[i].vcam_a2_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable analog power\n"); }         
+				//mt_set_gpio_mode(gpio_camera_cmpdn_pin,GPIO_CAMERA_CMPDN_PIN_M_GPIO);
+				//mt_set_gpio_dir(gpio_camera_cmpdn_pin,GPIO_DIR_OUT);
+				//mt_set_gpio_out(gpio_camera_cmpdn_pin,0);
+				mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+				//mt_set_gpio_mode(gpio_camera_cmrst_pin,GPIO_CAMERA_CMRST_PIN_M_GPIO);
+				//mt_set_gpio_dir(gpio_camera_cmrst_pin,GPIO_DIR_OUT);
+				//mt_set_gpio_out(gpio_camera_cmrst_pin,0);
+				mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+				mdelay(10);
+				//mt_set_gpio_out(gpio_camera_cmpdn_pin,1);
+				mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_ON]);
+				mdelay(5);
+				//mt_set_gpio_out(gpio_camera_cmrst_pin,1);
+				mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_ON]);
+				mdelay(5);			  
+	    	} else if (pinSetIdx == 1 && currSensorName &&  ( (0 != strcmp(SENSOR_DRVNAME_S5K4ECGX_YUV,currSensorName)) &&  (0 != strcmp(SENSOR_DRVNAME_S5K4ECGX_MIPI_YUV,currSensorName)) )) {  
+				PK_DBG("[CAMERA SENSOR] kdCISModulePowerOn get in---sensorName:%s; sensorIdx:%d; pinSetIdx=%d\n",currSensorName,SensorIdx, pinSetIdx);
+				//mt_set_gpio_mode(gpio_camera_cmpdn_pin,GPIO_CAMERA_CMPDN_PIN_M_GPIO);
+				//mt_set_gpio_dir(gpio_camera_cmpdn_pin,GPIO_DIR_OUT);
+				//mt_set_gpio_mode(gpio_camera_cmrst_pin,GPIO_CAMERA_CMRST_PIN_M_GPIO);
+				//mt_set_gpio_dir(gpio_camera_cmrst_pin,GPIO_DIR_OUT);
+				//mt_set_gpio_out(gpio_camera_cmrst_pin,0);
+				//mt_set_gpio_out(gpio_camera_cmpdn_pin,0);
+				mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+				mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+				mdelay(20);
+				printk("\n [kdCISModulePowerOn] [IOVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_IO.\n" ,pmicSet[pinSetIdx][IDX_PS_IOVDD] ,pinSetIdx);
+				if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_IOVDD], camera_list[i].vcam_d2_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable digital power\n"); }
+				printk("\n [kdCISModulePowerOn] [AVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_A.\n" ,pmicSet[pinSetIdx][IDX_PS_AVDD] ,pinSetIdx);
+				if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_AVDD], camera_list[i].vcam_a_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable analog power\n"); }
+				printk("\n [kdCISModulePowerOn] [DVDD = %d] [pinSetIdx = %d] open CAMERA_POWER_VCAM_D.\n" ,pmicSet[pinSetIdx][IDX_PS_DVDD] ,pinSetIdx);
+				if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_DVDD], camera_list[i].vcam_d_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable digital power\n"); }
+				//mt_set_gpio_mode(gpio_camera_cmpdn1_pin,GPIO_CAMERA_CMPDN1_PIN_M_GPIO);
+				//mt_set_gpio_dir(gpio_camera_cmpdn1_pin,GPIO_DIR_OUT);
+				//mt_set_gpio_out(gpio_camera_cmpdn1_pin,1);
+				//mt_set_gpio_mode(gpio_camera_cmrst1_pin,GPIO_CAMERA_CMRST_PIN_M_GPIO);
+				//mt_set_gpio_dir(gpio_camera_cmrst1_pin,GPIO_DIR_OUT);
+				//mt_set_gpio_out(gpio_camera_cmrst1_pin,0);
+				mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+				mdelay(10);
+				//mt_set_gpio_out(gpio_camera_cmpdn1_pin,0);
+				mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+				mdelay(5);
+				//mt_set_gpio_out(gpio_camera_cmrst1_pin,1);
+				mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_ON]);
+				mdelay(5);
+			} else {
+				// for i2c power is ok, which can make the i2c operation error, but not timeout
+				//IOVDD
+				if(TRUE != _hwPowerOnCnt(pmicSet[pinSetIdx][IDX_PS_IOVDD], camera_list[i].vcam_d2_volt,mode_name)) { PK_DBG("[CAMERA SENSOR] Fail to enable digital power\n"); }
+				mdelay(5);
+			}
+		}
+//----------------------------------------------
+	} else {//power OFF
+
+        /* Mark: need to verify whether ISP_MCLK1_EN is required in here //Jessy @2014/06/04 */
+#if 1
+        ISP_MCLK1_EN(0);
+        //ISP_MCLK2_EN(0);
+        //ISP_MCLK3_EN(0);
+#else
+        if(pinSetIdx == 0 ) {
+            ISP_MCLK1_EN(0);
+        }
+        else if (pinSetIdx == 1) {
+            ISP_MCLK1_EN(0);
+        }
+#endif         
+		printk("\n kdCISModulePowerOff -off:currSensorName=%s; pinSetIdx=%d\n",currSensorName, pinSetIdx);
+
+		if(!IS4EC) {
+			if( Interface_check(currSensorName, pinSetIdx, On, mode_name) != 0 ) { goto _kdCISModulePowerOn_exit_; }
+
+	        if (GPIO_CAMERA_INVALID != pinSet[pinSetIdx][IDX_PS_CMRST]) {
+	            //if(mt_set_gpio_mode(pinSet[pinSetIdx][IDX_PS_CMRST],pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_MODE])){PK_DBG("[CAMERA SENSOR] set gpio mode failed!! \n");}
+	            //if(mt_set_gpio_mode(pinSet[pinSetIdx][IDX_PS_CMPDN],pinSet[pinSetIdx][IDX_PS_CMPDN+IDX_PS_MODE])){PK_DBG("[CAMERA LENS] set gpio mode failed!! \n");}
+	            //if(mt_set_gpio_dir(pinSet[pinSetIdx][IDX_PS_CMRST],GPIO_DIR_OUT)){PK_DBG("[CAMERA SENSOR] set gpio dir failed!! \n");}
+	            //if(mt_set_gpio_dir(pinSet[pinSetIdx][IDX_PS_CMPDN],GPIO_DIR_OUT)){PK_DBG("[CAMERA LENS] set gpio dir failed!! \n");}
+	            //if(mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMRST],pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF])){PK_DBG("[CAMERA SENSOR] set gpio failed!! \n");} //low == reset sensor
+	    	      //if(mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMPDN],pinSet[pinSetIdx][IDX_PS_CMPDN+IDX_PS_OFF])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");} //high == power down lens module
+			mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+			mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+		 }
+	        printk("\n [kdCISModulePowerOn] [AVDD = %d] [pinSetIdx = %d] off CAMERA_POWER_VCAM_A.\n" ,pmicSet[pinSetIdx][IDX_PS_AVDD] ,pinSetIdx);
+	        if(TRUE != _hwPowerDownCnt(pmicSet[pinSetIdx][IDX_PS_AVDD],mode_name)) { PK_DBG("[CAMERA SENSOR] [AVDD] Fail to OFF analog power\n"); }
+	        printk("\n [kdCISModulePowerOn] [AFVDD = %d] [pinSetIdx = %d] off CAMERA_POWER_VCAM_AF.\n" ,pmicSet[pinSetIdx][IDX_PS_AFVDD] ,pinSetIdx);
+	        if(TRUE != _hwPowerDownCnt(pmicSet[pinSetIdx][IDX_PS_AFVDD],mode_name)) { PK_DBG("[CAMERA SENSOR] [AFVDD] Fail to OFF analog power\n"); }
+	        printk("\n [kdCISModulePowerOn] [DVDD = %d] [pinSetIdx = %d] off CAMERA_POWER_VCAM_D.\n" ,pmicSet[pinSetIdx][IDX_PS_DVDD] ,pinSetIdx);
+	        if(TRUE != _hwPowerDownCnt(pmicSet[pinSetIdx][IDX_PS_DVDD], mode_name)) { PK_DBG("[CAMERA SENSOR] [DVDD] Fail to OFF digital power\n"); }
+	        printk("\n [kdCISModulePowerOn] [IOVDD = %d] [pinSetIdx = %d] off CAMERA_POWER_VCAM_IO.\n" ,pmicSet[pinSetIdx][IDX_PS_IOVDD] ,pinSetIdx);
+	        if(TRUE != _hwPowerDownCnt(pmicSet[pinSetIdx][IDX_PS_IOVDD],mode_name)) { PK_DBG("[CAMERA SENSOR] [IOVDD] Fail to OFF digital power\n"); }
+
+	        //for W785 AF_POWER_EN
+	        //if(afpoweren) {
+				//mt_set_gpio_mode(gpio_af_power_en_pin, GPIO_MODE_00);
+				//mt_set_gpio_dir(gpio_af_power_en_pin, GPIO_DIR_OUT);
+				//mt_set_gpio_out(gpio_af_power_en_pin, 0);
+	        //}
+	        
+	        //For Power Saving
+	        if(pinSet[pinSetIdx][IDX_PS_CMPDN+IDX_PS_OFF] != GPIO_OUT_ZERO) { 
+			//mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMPDN], GPIO_OUT_ZERO); 
+			mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+		  }
+	        if(pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF] != GPIO_OUT_ZERO) { 
+			//mt_set_gpio_out(pinSet[pinSetIdx][IDX_PS_CMRST], GPIO_OUT_ZERO); 
+			mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+		  }
+	        
+	        // PLS add this
+	        if(pinSet[1-pinSetIdx][IDX_PS_CMPDN+IDX_PS_OFF] != GPIO_OUT_ZERO) { 
+			//mt_set_gpio_out(pinSet[1-pinSetIdx][IDX_PS_CMPDN], GPIO_OUT_ZERO); 
+			mtkcam_gpio_set(pinSetIdx, CAMPDN,pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
+		  }
+	        if(pinSet[1-pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF] != GPIO_OUT_ZERO) {
+			//mt_set_gpio_out(pinSet[1-pinSetIdx][IDX_PS_CMRST], GPIO_OUT_ZERO); 
+			mtkcam_gpio_set(pinSetIdx, CAMRST,pinSet[pinSetIdx][IDX_PS_CMRST+IDX_PS_OFF]);
+		  }
+	        //~For Power Saving
+
+		} else { //4ec
+//----------------------------------------------
+			//if(mt_set_gpio_mode(pinSet[0][IDX_PS_CMRST],pinSet[0][IDX_PS_CMRST+IDX_PS_MODE])){PK_DBG("[CAMERA SENSOR] set gpio mode failed!! \n");}
+			//if(mt_set_gpio_mode(pinSet[0][IDX_PS_CMPDN],pinSet[0][IDX_PS_CMPDN+IDX_PS_MODE])){PK_DBG("[CAMERA LENS] set gpio mode failed!! \n");}
+			//if(mt_set_gpio_mode(pinSet[1][IDX_PS_CMPDN],pinSet[1][IDX_PS_CMPDN+IDX_PS_MODE])){PK_DBG("[CAMERA LENS] set gpio mode failed!! \n");}
+			//if(mt_set_gpio_dir(pinSet[0][IDX_PS_CMRST],GPIO_DIR_OUT)){PK_DBG("[CAMERA SENSOR] set gpio dir failed!! \n");}
+			//if(mt_set_gpio_dir(pinSet[0][IDX_PS_CMPDN],GPIO_DIR_OUT)){PK_DBG("[CAMERA LENS] set gpio dir failed!! \n");}
+			//if(mt_set_gpio_dir(pinSet[1][IDX_PS_CMPDN],GPIO_DIR_OUT)){PK_DBG("[CAMERA LENS] set gpio dir failed!! \n");}
+			//if(mt_set_gpio_out(pinSet[0][IDX_PS_CMRST],pinSet[0][IDX_PS_CMRST+IDX_PS_ON])){PK_DBG("[CAMERA SENSOR] set gpio failed!! \n");}
+			//if(mt_set_gpio_out(pinSet[0][IDX_PS_CMPDN],pinSet[0][IDX_PS_CMPDN+IDX_PS_ON])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");}
+			//if(mt_set_gpio_out(pinSet[1][IDX_PS_CMPDN],pinSet[1][IDX_PS_CMPDN+IDX_PS_ON])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");}
+			mtkcam_gpio_set(0, CAMRST,pinSet[0][IDX_PS_CMRST+IDX_PS_ON]);
+			mtkcam_gpio_set(0, CAMPDN,pinSet[0][IDX_PS_CMPDN + IDX_PS_ON]);
+			mtkcam_gpio_set(1, CAMPDN,pinSet[1][IDX_PS_CMPDN + IDX_PS_ON]);
+			mdelay(10);
+			//if(mt_set_gpio_out(pinSet[1][IDX_PS_CMPDN],pinSet[1][IDX_PS_CMPDN+IDX_PS_OFF])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");}
+			mtkcam_gpio_set(1, CAMPDN,pinSet[1][IDX_PS_CMPDN + IDX_PS_OFF]);
+			mdelay(5);
+			//if(mt_set_gpio_out(pinSet[0][IDX_PS_CMRST],pinSet[0][IDX_PS_CMRST+IDX_PS_OFF])){PK_DBG("[CAMERA SENSOR] set gpio failed!! \n");}
+			mtkcam_gpio_set(0, CAMRST,pinSet[0][IDX_PS_CMRST+IDX_PS_ON]);
+			mdelay(5);
+			//if(mt_set_gpio_out(pinSet[0][IDX_PS_CMPDN],pinSet[0][IDX_PS_CMPDN+IDX_PS_OFF])){PK_DBG("[CAMERA LENS] set gpio failed!! \n");}
+			mtkcam_gpio_set(0, CAMPDN,pinSet[0][IDX_PS_CMPDN + IDX_PS_ON]);
+			printk("\n [kdCISModulePowerOn] [DVDD = %d] [pinSetIdx = %d] off CAMERA_POWER_VCAM_D.\n" ,pmicSet[pinSetIdx][IDX_PS_DVDD] ,pinSetIdx);
+			if(TRUE != _hwPowerDownCnt(pmicSet[pinSetIdx][IDX_PS_DVDD], mode_name)) { PK_DBG("[CAMERA SENSOR] [DVDD] Fail to OFF digital power\n");}
+			printk("\n [kdCISModulePowerOn] [AVDD = %d] [pinSetIdx = %d] off CAMERA_POWER_VCAM_A.\n" ,pmicSet[pinSetIdx][IDX_PS_AVDD] ,pinSetIdx);
+			if(TRUE != _hwPowerDownCnt(pmicSet[pinSetIdx][IDX_PS_AVDD],mode_name)) { PK_DBG("[CAMERA SENSOR] [AVDD] Fail to OFF analog power\n");}
+			printk("\n [kdCISModulePowerOn] [IOVDD = %d] [pinSetIdx = %d] off CAMERA_POWER_VCAM_IO.\n" ,pmicSet[pinSetIdx][IDX_PS_IOVDD] ,pinSetIdx);
+			if(TRUE != _hwPowerDownCnt(pmicSet[pinSetIdx][IDX_PS_IOVDD],mode_name)) { PK_DBG("[CAMERA SENSOR] [IOVDD] Fail to OFF digital power\n");} 
+			printk("\n [kdCISModulePowerOn] [AFVDD = %d] [pinSetIdx = %d] off CAMERA_POWER_VCAM_AF.\n" ,pmicSet[pinSetIdx][IDX_PS_AFVDD] ,pinSetIdx);
+			if(TRUE != _hwPowerDownCnt(pmicSet[pinSetIdx][IDX_PS_AFVDD],mode_name)) { PK_DBG("[CAMERA SENSOR] [AFVDD] Fail to OFF analog power\n"); }
+		}
+//----------------------------------------------   
+    }
+
+    return 0;
+
+_kdCISModulePowerOn_exit_:
+    return -EIO;
+    
+}
+
+EXPORT_SYMBOL(kdCISModulePowerOn);
+
