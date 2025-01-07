@@ -173,7 +173,7 @@ static inline bool unconditional(const struct ipt_entry *e)
 	static const struct ipt_ip uncond;
 
 	return e->target_offset == sizeof(struct ipt_entry) &&
-	       memcmp(&e->ip, &uncond, sizeof(uncond)) == 0;
+		memcmp(&e->ip, &uncond, sizeof(uncond)) == 0;
 #undef FWINV
 }
 
@@ -725,8 +725,7 @@ check_entry_size_and_hooks(struct ipt_entry *e,
 	int err;
 
 	if ((unsigned long)e % __alignof__(struct ipt_entry) != 0 ||
-	    (unsigned char *)e + sizeof(struct ipt_entry) >= limit ||
-	    (unsigned char *)e + e->next_offset > limit) {
+	    (unsigned char *)e + sizeof(struct ipt_entry) >= limit) {
 		duprintf("Bad offset %p\n", e);
 		return -EINVAL;
 	}
@@ -750,9 +749,7 @@ check_entry_size_and_hooks(struct ipt_entry *e,
 			newinfo->hook_entry[h] = hook_entries[h];
 		if ((unsigned char *)e - base == underflows[h]) {
 			if (!check_underflow(e)) {
-				pr_debug("Underflows must be unconditional and "
-					 "use the STANDARD target with "
-					 "ACCEPT/DROP\n");
+				pr_debug("Underflows must be unconditional and use the STANDARD target with ACCEPT/DROP\n");
 				return -EINVAL;
 			}
 			newinfo->underflow[h] = underflows[h];
@@ -1489,8 +1486,7 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
 
 	duprintf("check_compat_entry_size_and_hooks %p\n", e);
 	if ((unsigned long)e % __alignof__(struct compat_ipt_entry) != 0 ||
-	    (unsigned char *)e + sizeof(struct compat_ipt_entry) >= limit ||
-	    (unsigned char *)e + e->next_offset > limit) {
+	    (unsigned char *)e + sizeof(struct compat_ipt_entry) >= limit) {
 		duprintf("Bad offset %p, limit = %p\n", e, limit);
 		return -EINVAL;
 	}

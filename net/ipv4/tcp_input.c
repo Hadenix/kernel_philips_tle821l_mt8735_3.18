@@ -2009,7 +2009,7 @@ static bool tcp_check_sack_reneging(struct sock *sk, int flag)
 					  msecs_to_jiffies(10));
 
 		inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
-					  delay, TCP_RTO_MAX);
+					  delay, sysctl_tcp_rto_max);
 		return true;
 	}
 	return false;
@@ -2060,7 +2060,7 @@ static bool tcp_pause_early_retransmit(struct sock *sk, int flag)
 		return false;
 
 	inet_csk_reset_xmit_timer(sk, ICSK_TIME_EARLY_RETRANS, delay,
-				  TCP_RTO_MAX);
+				  sysctl_tcp_rto_max);
 	return true;
 }
 
@@ -2990,7 +2990,7 @@ void tcp_rearm_rto(struct sock *sk)
 				rto = delta;
 		}
 		inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS, rto,
-					  TCP_RTO_MAX);
+					  sysctl_tcp_rto_max);
 	}
 }
 
@@ -3236,10 +3236,10 @@ static void tcp_ack_probe(struct sock *sk)
 		 * This function is not for random using!
 		 */
 	} else {
-		unsigned long when = inet_csk_rto_backoff(icsk, TCP_RTO_MAX);
+		unsigned long when = inet_csk_rto_backoff(icsk, sysctl_tcp_rto_max);
 
 		inet_csk_reset_xmit_timer(sk, ICSK_TIME_PROBE0,
-					  when, TCP_RTO_MAX);
+					  when, sysctl_tcp_rto_max);
 	}
 }
 
@@ -3325,16 +3325,17 @@ static void tcp_send_challenge_ack(struct sock *sk)
 	/* unprotected vars, we dont care of overwrites */
 	static u32 challenge_timestamp;
 	static unsigned int challenge_count;
-	u32 now = jiffies / HZ;
-	u32 count;
+	u32 count, now = jiffies / HZ;
 
+	/* Then check host-wide RFC 5961 rate limit. */
 	if (now != challenge_timestamp) {
 		u32 half = (sysctl_tcp_challenge_ack_limit + 1) >> 1;
 
 		challenge_timestamp = now;
 		WRITE_ONCE(challenge_count, half +
-			   prandom_u32_max(sysctl_tcp_challenge_ack_limit));
+				prandom_u32_max(sysctl_tcp_challenge_ack_limit));
 	}
+
 	count = READ_ONCE(challenge_count);
 	if (count > 0) {
 		WRITE_ONCE(challenge_count, count - 1);
@@ -5486,7 +5487,7 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 			icsk->icsk_ack.lrcvtime = tcp_time_stamp;
 			tcp_enter_quickack_mode(sk);
 			inet_csk_reset_xmit_timer(sk, ICSK_TIME_DACK,
-						  TCP_DELACK_MAX, TCP_RTO_MAX);
+						  TCP_DELACK_MAX, sysctl_tcp_rto_max);
 
 discard:
 			__kfree_skb(skb);
